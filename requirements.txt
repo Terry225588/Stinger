@@ -1,0 +1,21 @@
+# 运行依赖。版本是在 Linux、Python 3.12.3 上实际安装并通过测试的组合。
+# 编写时核对过 PyPI：这些版本有 Windows amd64 的 Python 3.12 轮子。
+# numpy==2.5.5 的 Windows 轮子从 cp312 起，没有 cp311。请使用 64 位 Python 3.12。
+# 安装这一步需要联网，或事先准备同版本的 wheel。
+# 装好之后，rapidocr-onnxruntime 使用安装包内的三个 ONNX 模型，程序本身不调用云端识题接口。
+et-xmlfile==2.0.0
+flatbuffers==25.12.19
+mss==9.0.2
+numpy==2.5.5
+onnxruntime==1.32.0
+opencv-python==5.1.0.95
+openpyxl==3.1.5
+packaging==26.4
+pillow==13.0.0
+protobuf==7.36.2
+pyclipper==1.4.0
+PyYAML==6.0.4
+rapidocr-onnxruntime==1.4.4
+shapely==2.2.0
+six==1.17.0
+tqdm==4.70.1

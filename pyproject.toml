@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screenmatch"
+version = "0.1.0"
+description = "本地屏幕区域识题，并与本机题库对照"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "et-xmlfile==2.0.0",
+    "flatbuffers==25.12.19",
+    "mss==9.0.2",
+    "numpy==2.5.5",
+    "onnxruntime==1.32.0",
+    "opencv-python==5.1.0.95",
+    "openpyxl==3.1.5",
+    "packaging==26.4",
+    "pillow==13.0.0",
+    "protobuf==7.36.2",
+    "pyclipper==1.4.0",
+    "PyYAML==6.0.4",
+    "rapidocr-onnxruntime==1.4.4",
+    "shapely==2.2.0",
+    "six==1.17.0",
+    "tqdm==4.70.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

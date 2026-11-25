@@ -1,0 +1,3 @@
+-r requirements.txt
+# 只在 Windows 10 x64 上打包时安装。本仓库的开发环境是 Linux，没有生成或验证过 exe。
+pyinstaller==6.22.3
