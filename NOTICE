@@ -1,0 +1,27 @@
+Stinger
+Copyright 2026 Stinger contributors
+
+本项目按 Apache License 2.0 发布。本仓库是独立实现，不是把
+https://github.com/Lihvarya/ibosOCR 的源文件拷贝进来再修改。
+
+核对许可时，该仓库根目录的 LICENSE 为 Apache License, Version 2.0。
+当时读取到的默认分支树对象为 bd53ad37f56e4f0192f171a14cfdd972830c3076。
+仓库没有 NOTICE 文件。本仓库不包含它的脚本、配置，也不包含它的题库 JSON。
+
+参考并重写的只有这些想法：
+
+- 用鼠标在屏幕上框出一块矩形，再对这块区域做 OCR
+- 画面没有变化时，不重复做识别
+- 题目只在本机题库里查找
+
+本程序不点击网页，不向页面发送按键或鼠标事件，不用隐藏窗口、穿透点击、
+伪造焦点或对抗页面的焦点检测。框选遮罩是普通的可见窗口。
+
+第三方组件只作为依赖使用，没有改它们的源码：
+
+- RapidOCR / rapidocr-onnxruntime 1.4.4，Apache-2.0，作者 SWHL 等
+- ONNX Runtime、OpenCV、NumPy、Pillow、openpyxl、mss、PyYAML、Shapely、pyclipper
+
+中文识别模型是 rapidocr-onnxruntime 安装包里自带的 PP-OCRv4 ONNX 文件。
+安装这个包时需要下载安装包；安装完成后，识别读取这些本地文件。
+本程序没有云端 OCR 接口，也没有需要填写的密钥。
