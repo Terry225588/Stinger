@@ -25,3 +25,13 @@ https://github.com/Lihvarya/ibosOCR 的源文件拷贝进来再修改。
 中文识别模型是 rapidocr-onnxruntime 安装包里自带的 PP-OCRv4 ONNX 文件。
 安装这个包时需要下载安装包；安装完成后，识别读取这些本地文件。
 本程序没有云端 OCR 接口，也没有需要填写的密钥。
+
+Android 版另外使用这些依赖，没有改它们的源码：
+
+- AndroidX、CameraX、Kotlin，Apache-2.0
+- Google ML Kit Text Recognition Chinese（`com.google.mlkit:text-recognition-chinese` 16.0.1）
+  这是带模型的依赖，中文识别模型打进 APK，不在首次启动时下载。
+  它的使用条款是 Google ML Kit Terms of Service，不是 Apache-2.0。
+  本仓库不把该模型当成自己的源码。
+
+手机版不提供局域网、Wi-Fi、二维码或 HTTP 传题库。Excel 由用户自行放到手机里再选择。
