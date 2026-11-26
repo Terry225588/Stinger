@@ -8,26 +8,36 @@ import javax.xml.parsers.DocumentBuilderFactory
 class BankFormatException(message: String) : IllegalArgumentException(message)
 
 fun readXlsxRows(bytes: ByteArray): List<List<List<String?>>> {
+    if (bytes.isEmpty()) throw BankFormatException("文件是空的。")
     val entries = HashMap<String, ByteArray>()
-    ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
-        var entry = zip.nextEntry
-        while (entry != null) {
-            if (!entry.isDirectory) {
-                entries[entry.name.removePrefix("/")] = zip.readBytes()
+    try {
+        ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    val name = entry.name.replace('\\', '/').removePrefix("/").lowercase()
+                    entries[name] = zip.readBytes()
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
             }
-            zip.closeEntry()
-            entry = zip.nextEntry
         }
+    } catch (_: Exception) {
+        throw BankFormatException("文件打不开，内容不是有效的 xlsx。")
     }
-    if (entries.isEmpty()) throw BankFormatException("Excel 无法读取。")
-    val workbook = entries["xl/workbook.xml"] ?: throw BankFormatException("Excel 缺少工作表。")
-    val rels = entries["xl/_rels/workbook.xml.rels"] ?: throw BankFormatException("Excel 缺少工作表。")
-    val relationTargets = relationTargets(rels)
-    val sheetPaths = sheetPaths(workbook, relationTargets)
+    if (entries.isEmpty()) throw BankFormatException("文件打不开，内容不是有效的 xlsx。")
+    fun get(path: String): ByteArray? = entries[path.replace('\\', '/').removePrefix("/").lowercase()]
+    val workbook = get("xl/workbook.xml") ?: throw BankFormatException("Excel 缺少工作表。")
+    val rels = get("xl/_rels/workbook.xml.rels")
+    val relationTargets = if (rels != null) relationTargets(rels) else emptyMap()
+    var sheetPaths = if (rels != null) sheetPaths(workbook, relationTargets) else emptyList()
+    if (sheetPaths.isEmpty()) {
+        sheetPaths = entries.keys.filter { it.startsWith("xl/worksheets/") && it.endsWith(".xml") }.sorted()
+    }
     if (sheetPaths.isEmpty()) throw BankFormatException("Excel 缺少工作表。")
-    val shared = entries["xl/sharedStrings.xml"]?.let { sharedStrings(it) } ?: emptyList()
+    val shared = get("xl/sharedStrings.xml")?.let { sharedStrings(it) } ?: emptyList()
     return sheetPaths.map { path ->
-        val sheet = entries[path] ?: throw BankFormatException("Excel 缺少工作表。")
+        val sheet = get(path) ?: throw BankFormatException("Excel 缺少工作表。")
         sheetRows(sheet, shared)
     }
 }
@@ -35,31 +45,33 @@ fun readXlsxRows(bytes: ByteArray): List<List<List<String?>>> {
 private fun relationTargets(xml: ByteArray): Map<String, String> {
     val document = parseXml(xml)
     val map = LinkedHashMap<String, String>()
-    for (node in elements(document.documentElement, "Relationship")) {
-        val id = node.getAttribute("Id")
-        val target = node.getAttribute("Target").removePrefix("/")
-        if (id.isNotEmpty() && target.isNotEmpty()) {
-            val path = if (target.startsWith("xl/")) target else "xl/$target"
-            map[id] = path
-        }
+    for (node in childElements(document.documentElement, "Relationship")) {
+        val id = attr(node, "Id")
+        val target = attr(node, "Target")
+        if (id.isNotEmpty() && target.isNotEmpty()) map[id] = resolveTarget(target)
     }
     return map
+}
+
+private fun resolveTarget(target: String): String {
+    val cleaned = target.trim().replace('\\', '/')
+    val relative = if (cleaned.startsWith("/")) cleaned.removePrefix("/") else "xl/$cleaned"
+    val parts = ArrayList<String>()
+    for (part in relative.split('/')) {
+        when (part) {
+            "", "." -> Unit
+            ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
+            else -> parts.add(part)
+        }
+    }
+    return parts.joinToString("/")
 }
 
 private fun sheetPaths(xml: ByteArray, relations: Map<String, String>): List<String> {
     val document = parseXml(xml)
     val paths = ArrayList<String>()
     for (node in descendants(document.documentElement, "sheet")) {
-        val id = node.getAttribute("r:id").ifEmpty {
-            node.attributes.let { attrs ->
-                var found = ""
-                for (i in 0 until attrs.length) {
-                    val item = attrs.item(i)
-                    if (item.localName == "id") found = item.nodeValue
-                }
-                found
-            }
-        }
+        val id = attr(node, "id")
         val path = relations[id]
         if (path != null) paths.add(path)
     }
@@ -70,7 +82,7 @@ private fun sharedStrings(xml: ByteArray): List<String> {
     val document = parseXml(xml)
     val values = ArrayList<String>()
     for (node in descendants(document.documentElement, "si")) {
-        values.add(descendantText(node, "t"))
+        values.add(textExcludingPhonetic(node))
     }
     return values
 }
@@ -80,11 +92,11 @@ private fun sheetRows(xml: ByteArray, shared: List<String>): List<List<String?>>
     val sheetData = descendants(document.documentElement, "sheetData").firstOrNull()
         ?: document.documentElement
     val byIndex = java.util.TreeMap<Int, List<String?>>()
-    for (row in elements(sheetData, "row")) {
+    for (row in childElements(sheetData, "row")) {
         var width = 0
         val cells = ArrayList<Pair<Int, String?>>()
-        for (cell in elements(row, "c")) {
-            val ref = cell.getAttribute("r")
+        for (cell in childElements(row, "c")) {
+            val ref = attr(cell, "r")
             val column = if (ref.isNotEmpty()) columnIndex(ref) else width
             if (column >= 0) cells.add(column to cellText(cell, shared))
             width = maxOf(width, column + 1)
@@ -93,7 +105,7 @@ private fun sheetRows(xml: ByteArray, shared: List<String>): List<List<String?>>
         for ((column, text) in cells) {
             if (column in values.indices) values[column] = text
         }
-        val rowIndex = row.getAttribute("r").toIntOrNull()?.minus(1) ?: byIndex.size
+        val rowIndex = attr(row, "r").toIntOrNull()?.minus(1) ?: byIndex.size
         if (rowIndex >= 0) byIndex[rowIndex] = values
     }
     if (byIndex.isEmpty()) return emptyList()
@@ -102,8 +114,8 @@ private fun sheetRows(xml: ByteArray, shared: List<String>): List<List<String?>>
 }
 
 private fun cellText(cell: Element, shared: List<String>): String? {
-    val type = cell.getAttribute("t")
-    if (type == "inlineStr") return descendantText(cell, "t")
+    val type = attr(cell, "t")
+    if (type == "inlineStr") return textExcludingPhonetic(cell)
     val raw = descendants(cell, "v").firstOrNull()?.textContent ?: return null
     return when (type) {
         "s" -> shared.getOrNull(raw.toIntOrNull() ?: -1)
@@ -133,32 +145,94 @@ private fun columnIndex(ref: String): Int {
 private fun parseXml(xml: ByteArray): org.w3c.dom.Document {
     val factory = DocumentBuilderFactory.newInstance()
     factory.isNamespaceAware = true
-    factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-    factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-    factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-    return factory.newDocumentBuilder().parse(ByteArrayInputStream(xml))
+    factory.isExpandEntityReferences = false
+    // Android 自带的解析器没有 Xerces 这些开关。设不上就继续解析，不能因此让整份题库失败。
+    trySetFeature(factory, "http://apache.org/xml/features/disallow-doctype-decl", true)
+    trySetFeature(factory, "http://xml.org/sax/features/external-general-entities", false)
+    trySetFeature(factory, "http://xml.org/sax/features/external-parameter-entities", false)
+    return try {
+        factory.newDocumentBuilder().parse(ByteArrayInputStream(xml))
+    } catch (exc: BankFormatException) {
+        throw exc
+    } catch (_: Exception) {
+        throw BankFormatException("Excel 内容无法解析。")
+    }
 }
 
-private fun elements(parent: Element, local: String): List<Element> {
-    val nodes = parent.getElementsByTagNameNS("*", local)
-    val list = ArrayList<Element>(nodes.length)
-    for (i in 0 until nodes.length) {
-        val node = nodes.item(i)
-        if (node is Element && node.parentNode == parent) list.add(node)
+private fun trySetFeature(factory: DocumentBuilderFactory, name: String, value: Boolean) {
+    try {
+        factory.setFeature(name, value)
+    } catch (_: Exception) {
+        // 手机上的解析器不认识这项时，跳过即可。
+    }
+}
+
+private fun childElements(parent: org.w3c.dom.Node, local: String): List<Element> {
+    val list = ArrayList<Element>()
+    val children = parent.childNodes ?: return list
+    for (index in 0 until children.length) {
+        val child = children.item(index)
+        if (child is Element && localNameOf(child) == local) list.add(child)
     }
     return list
 }
 
-private fun descendants(parent: Element, local: String): List<Element> {
-    val nodes = parent.getElementsByTagNameNS("*", local)
-    val list = ArrayList<Element>(nodes.length)
-    for (i in 0 until nodes.length) {
-        val node = nodes.item(i)
-        if (node is Element) list.add(node)
+private fun descendants(parent: org.w3c.dom.Node, local: String): List<Element> {
+    val list = ArrayList<Element>()
+    fun walk(node: org.w3c.dom.Node) {
+        val children = node.childNodes ?: return
+        for (index in 0 until children.length) {
+            val child = children.item(index)
+            if (child is Element) {
+                if (localNameOf(child) == local) list.add(child)
+                walk(child)
+            }
+        }
     }
+    walk(parent)
     return list
 }
 
-private fun descendantText(parent: Element, local: String): String {
-    return descendants(parent, local).joinToString("") { it.textContent ?: "" }
+private fun textExcludingPhonetic(parent: Element): String {
+    val text = StringBuilder()
+    fun walk(node: org.w3c.dom.Node, phonetic: Boolean) {
+        val children = node.childNodes ?: return
+        for (index in 0 until children.length) {
+            val child = children.item(index)
+            if (child !is Element) continue
+            val name = localNameOf(child)
+            val nextPhonetic = phonetic || name == "rPh"
+            if (name == "t" && !nextPhonetic) text.append(child.textContent ?: "")
+            else walk(child, nextPhonetic)
+        }
+    }
+    walk(parent, false)
+    return text.toString()
+}
+
+private fun localNameOf(node: org.w3c.dom.Node): String {
+    val local = node.localName
+    if (!local.isNullOrEmpty()) return local
+    val name = node.nodeName ?: return ""
+    val colon = name.indexOf(':')
+    return if (colon >= 0) name.substring(colon + 1) else name
+}
+
+private fun attr(element: Element, local: String): String {
+    val direct = element.getAttribute(local)
+    if (direct.isNotEmpty()) return direct
+    val namespaced = element.getAttributeNS(
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        local,
+    )
+    if (!namespaced.isNullOrEmpty()) return namespaced
+    val attributes = element.attributes ?: return ""
+    for (index in 0 until attributes.length) {
+        val item = attributes.item(index) ?: continue
+        val name = item.nodeName ?: continue
+        if (item.localName == local || name == local || name.endsWith(":$local")) {
+            return item.nodeValue ?: ""
+        }
+    }
+    return ""
 }

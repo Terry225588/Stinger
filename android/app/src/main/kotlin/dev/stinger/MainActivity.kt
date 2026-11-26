@@ -1,16 +1,20 @@
 package dev.stinger
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -30,6 +34,11 @@ import dev.stinger.match.BankCatalog
 import dev.stinger.match.CameraReadout
 import dev.stinger.match.FrameGate
 import dev.stinger.match.LookupSession
+import dev.stinger.match.formatBatchLine
+import dev.stinger.match.importNameFor
+import dev.stinger.match.normalizeImportName
+import dev.stinger.match.precheckImport
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -48,6 +57,8 @@ class MainActivity : AppCompatActivity() {
     private var askedPermission = false
     private var updatingSpinner = false
     private val closed = AtomicBoolean(false)
+    private var stickyStatus: CameraReadout? = null
+    private var pendingUris: List<Uri>? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -56,45 +67,58 @@ class MainActivity : AppCompatActivity() {
         if (granted) openCamera() else showPermissionDenied()
     }
 
+    private val storagePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val uris = pendingUris
+        pendingUris = null
+        if (!granted || uris.isNullOrEmpty()) {
+            showImport(
+                CameraReadout(
+                    null,
+                    "导入失败",
+                    "没有存储权限，读不到这个文件。请允许存储权限，或从文件管理器重新选择 .xlsx。",
+                ),
+            )
+        } else {
+            acceptUris(uris)
+        }
+    }
+
     private val importLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        val data = result.data ?: return@registerForActivityResult
+        if (result.resultCode != Activity.RESULT_OK) return@registerForActivityResult
+        val data = result.data
+        if (data == null) {
+            showImport(CameraReadout(null, "导入失败", "没有选到文件。"))
+            return@registerForActivityResult
+        }
         val uris = ArrayList<Uri>()
         val clip = data.clipData
         if (clip != null) {
-            for (index in 0 until clip.itemCount) uris.add(clip.getItemAt(index).uri)
-        } else {
-            data.data?.let { uris.add(it) }
+            for (index in 0 until clip.itemCount) {
+                clip.getItemAt(index)?.uri?.let { uris.add(it) }
+            }
         }
-        if (uris.isEmpty()) return@registerForActivityResult
-        workExecutor.execute {
-            val lines = ArrayList<String>()
+        if (uris.isEmpty()) data.data?.let { uris.add(it) }
+        if (uris.isEmpty()) {
+            showImport(CameraReadout(null, "导入失败", "没有选到文件。"))
+            return@registerForActivityResult
+        }
+        val flags = data.flags and (
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        if (flags != 0) {
             for (uri in uris) {
-                val name = displayName(uri)
-                if (!name.lowercase().endsWith(".xlsx")) {
-                    lines.add("$name：失败。只支持 .xlsx。")
-                    continue
-                }
                 try {
-                    val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                        ?: throw IllegalArgumentException("无法读取文件")
-                    val report = catalog.addBytes(name, bytes)
-                    lines.add(dev.stinger.match.formatBatchLine(name, report, ""))
-                    report.rejected.take(3).forEach { row ->
-                        lines.add("  第 ${row.row} 行：${row.reason}")
-                    }
-                } catch (exc: Exception) {
-                    lines.add(dev.stinger.match.formatBatchLine(name, null, exc.message ?: "无法导入"))
+                    contentResolver.takePersistableUriPermission(uri, flags)
+                } catch (_: Exception) {
+                    // GET_CONTENT 的授权往往不能长期保存。下面会立刻把内容拷进应用目录。
                 }
-            }
-            catalog.save(catalogDir())
-            session.invalidate()
-            runOnUiThread {
-                refreshBanks()
-                render(CameraReadout(null, "对准题目", lines.joinToString("\n")))
             }
         }
+        acceptUris(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -152,13 +176,145 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openImporter() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val open = pickIntent(Intent.ACTION_OPEN_DOCUMENT)
+        val getContent = pickIntent(Intent.ACTION_GET_CONTENT)
+        try {
+            val chooser = Intent.createChooser(open, getString(R.string.pick_excel)).apply {
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(getContent))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            importLauncher.launch(chooser)
+        } catch (_: ActivityNotFoundException) {
+            try {
+                importLauncher.launch(getContent)
+            } catch (_: ActivityNotFoundException) {
+                showImport(
+                    CameraReadout(
+                        null,
+                        "导入失败",
+                        "这台手机没有可以打开文件的程序。请安装文件管理器后，再选择 .xlsx。",
+                    ),
+                )
+            }
         }
-        importLauncher.launch(intent)
+    }
+
+    private fun pickIntent(action: String): Intent {
+        return Intent(action).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/vnd.ms-excel",
+                    "application/octet-stream",
+                    "application/zip",
+                    "application/x-zip-compressed",
+                    "*/*",
+                ),
+            )
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (action == Intent.ACTION_OPEN_DOCUMENT) {
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+        }
+    }
+
+    private fun acceptUris(uris: List<Uri>) {
+        if (uris.any { needsLegacyStorage(it) }) {
+            pendingUris = uris
+            showImport(CameraReadout(null, "需要存储权限", getString(R.string.storage_rationale)))
+            storagePermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            return
+        }
+        val copied = ArrayList<Pair<String, ByteArray>>()
+        val early = ArrayList<String>()
+        for (uri in uris) {
+            val name = displayName(uri)
+            try {
+                copied.add(name to copyIntoAppStorage(uri, name))
+            } catch (exc: Exception) {
+                early.add("${normalizeImportName(name)}：失败。${exc.message ?: "无法读取"}")
+            }
+        }
+        workExecutor.execute {
+            val lines = ArrayList<String>()
+            lines.addAll(early)
+            for ((name, bytes) in copied) {
+                val storedName = importNameFor(name)
+                val reason = precheckImport(name, bytes)
+                if (reason != null) {
+                    lines.add("$storedName：失败。$reason")
+                    continue
+                }
+                try {
+                    val report = catalog.addBytes(storedName, bytes)
+                    lines.add(formatBatchLine(storedName, report, ""))
+                    report.rejected.take(3).forEach { row ->
+                        lines.add("  第 ${row.row} 行：${row.reason}")
+                    }
+                } catch (exc: Exception) {
+                    lines.add("$storedName：失败。${exc.message ?: "无法导入"}")
+                }
+            }
+            val anySuccess = lines.any { "：成功" in it }
+            if (anySuccess) {
+                catalog.save(catalogDir())
+                session.invalidate()
+            }
+            val badge = if (anySuccess) "已导入" else "导入失败"
+            val detail = if (lines.isEmpty()) "没有选到文件。" else lines.joinToString("\n")
+            runOnUiThread {
+                if (closed.get()) return@runOnUiThread
+                refreshBanks()
+                showImport(CameraReadout(null, badge, detail))
+            }
+        }
+    }
+
+    private fun needsLegacyStorage(uri: Uri): Boolean {
+        if (!"file".equals(uri.scheme, ignoreCase = true)) return false
+        if (Build.VERSION.SDK_INT >= 33) return false
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+        ) != PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun copyIntoAppStorage(uri: Uri, name: String): ByteArray {
+        val bytes = if ("file".equals(uri.scheme, ignoreCase = true)) {
+            val path = uri.path ?: throw IllegalArgumentException("找不到文件")
+            val file = File(path)
+            if (!file.isFile) throw IllegalArgumentException("找不到文件")
+            if (file.length() > MAX_IMPORT_BYTES) throw IllegalArgumentException("文件太大。")
+            file.readBytes()
+        } else {
+            val input = try {
+                contentResolver.openInputStream(uri)
+            } catch (_: SecurityException) {
+                throw IllegalArgumentException("没有读到文件的权限。请重新选择一次。")
+            } ?: throw IllegalArgumentException("无法读取文件")
+            input.use { stream ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val count = stream.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    if (total > MAX_IMPORT_BYTES) throw IllegalArgumentException("文件太大。")
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+        }
+        val folder = File(filesDir, "imports").apply { mkdirs() }
+        val safe = importNameFor(name).replace(Regex("""[^\w\u4e00-\u9fff.\-]+"""), "_")
+        File(folder, "${System.currentTimeMillis()}-$safe").writeBytes(bytes)
+        return bytes
     }
 
     private fun requestCamera() {
@@ -303,20 +459,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showImport(readout: CameraReadout) {
+        stickyStatus = readout
+        val summary = readout.context.lineSequence().firstOrNull { it.isNotBlank() } ?: readout.badge
+        Toast.makeText(this, summary, Toast.LENGTH_LONG).show()
+        render(readout)
+    }
+
     private fun render(readout: CameraReadout) {
-        val answer = readout.answer
+        val keepSticky = stickyStatus != null && readout.answer == null &&
+            (readout.badge == "请先导入题库" || (readout.badge == getString(R.string.aim) && readout.context.isEmpty()))
+        val shown = if (keepSticky) stickyStatus!! else readout
+        if (!keepSticky && shown !== stickyStatus) stickyStatus = null
+        val answer = shown.answer
         if (answer.isNullOrEmpty()) {
             binding.answer.text = ""
             binding.answer.setTextColor(0xFFC62828.toInt())
-            binding.badge.text = readout.badge
-            binding.badge.setTextColor(0xFFECEFF1.toInt())
+            binding.badge.text = shown.badge
+            binding.badge.setTextColor(if (shown.badge == "导入失败") 0xFFFFB74D.toInt() else 0xFFECEFF1.toInt())
         } else {
             binding.answer.text = answer
             binding.answer.setTextColor(0xFFC62828.toInt())
-            binding.badge.text = readout.badge
-            binding.badge.setTextColor(if (readout.badge == "待确认") 0xFFFFB74D.toInt() else 0xFFECEFF1.toInt())
+            binding.badge.text = shown.badge
+            binding.badge.setTextColor(if (shown.badge == "待确认") 0xFFFFB74D.toInt() else 0xFFECEFF1.toInt())
         }
-        binding.context.text = readout.context
+        binding.context.text = shown.context
     }
 
     private fun refreshBanks() {
@@ -349,13 +516,20 @@ class MainActivity : AppCompatActivity() {
     private fun catalogDir(): File = File(filesDir, "catalog").apply { mkdirs() }
 
     private fun displayName(uri: Uri): String {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0) return cursor.getString(index) ?: "题库.xlsx"
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) {
+                        val value = cursor.getString(index)
+                        if (!value.isNullOrBlank()) return normalizeImportName(value)
+                    }
+                }
             }
+        } catch (_: Exception) {
+            // 部分文件管理器不允许查询文件名。下面改用地址里的名字。
         }
-        return uri.lastPathSegment?.substringAfterLast('/') ?: "题库.xlsx"
+        return normalizeImportName(uri.lastPathSegment ?: "题库.xlsx")
     }
 
     private fun cropToTarget(source: Bitmap): Bitmap {
@@ -374,5 +548,9 @@ class MainActivity : AppCompatActivity() {
             .filter { it.isNotEmpty() }
         if (lines.isNotEmpty()) return lines.joinToString("\n")
         return text.text
+    }
+
+    companion object {
+        private const val MAX_IMPORT_BYTES = 32 * 1024 * 1024
     }
 }

@@ -214,6 +214,10 @@ class BankCatalog {
 
 fun formatBatchLine(name: String, report: ImportReport?, error: String): String {
     if (report == null) return "$name：失败。$error"
+    if (report.validCount == 0) {
+        val why = report.rejected.firstOrNull()?.let { "第 ${it.row} 行：${it.reason}" } ?: "没有找到可导入的题目"
+        return "$name：失败。没有导入题目。$why"
+    }
     return "$name：成功 ${report.validCount} 题，跳过 ${report.rejected.size} 行。"
 }
 

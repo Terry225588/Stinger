@@ -374,6 +374,29 @@ class CoreParityTest {
         assertTrue(gate.tryAcquire())
         assertFalse(gate.tryAcquire())
     }
+
+    @Test
+    fun phoneImportAcceptsChineseNamesSharedStringsAndRejectsTheWrongFile() {
+        assertEquals("题库（一）.xlsx", normalizeImportName("%E9%A2%98%E5%BA%93%EF%BC%88%E4%B8%80%EF%BC%89.xlsx"))
+        assertEquals("题库.xlsx", importNameFor("primary:Download/题库.xlsx"))
+        assertEquals("微信文件.xlsx", importNameFor("微信文件"))
+        assertTrue(isXlsxName("下载/安全生产.xlsx"))
+        assertEquals("不能读取旧版 .xls。请在表格软件里另存为 .xlsx 后再选。", precheckImport("旧表.xls", byteArrayOf(1, 2, 3, 4)))
+        assertEquals("文件是空的。", precheckImport("题库.xlsx", byteArrayOf()))
+        assertEquals("这不是 Excel 文件。请选择 .xlsx，官方模板也是这种文件。", precheckImport("照片.jpg", "hello".toByteArray()))
+        val template = javaClass.classLoader.getResourceAsStream("stinger-question-template.xlsx")!!.readBytes()
+        assertEquals(null, precheckImport("无扩展名", template))
+        assertEquals("无扩展名.xlsx", importNameFor("无扩展名"))
+        val shared = sharedStringXlsx()
+        assertEquals(null, precheckImport("octet-stream.bin", shared))
+        val (bank, report) = loadBankBytes(shared, "微信接收的题库.xlsx")
+        assertEquals(1, report.validCount)
+        assertEquals("传输层负责什么", bank.questions.single().stem)
+        assertEquals("A", bank.questions.single().answer)
+        val missingHeader = xlsx(listOf(listOf("姓名", "备注"), listOf("甲", "乙")))
+        val error = assertFailsWith<BankFormatException> { loadBankBytes(missingHeader, "没有表头.xlsx") }
+        assertTrue(error.message.orEmpty().contains("表头"))
+    }
 }
 
 private val HEADERS = listOf("题型", "题目", "A", "B", "C", "D", "E", "F", "答案", "难度", "试题依据", "试题解析", "保命题")
@@ -435,6 +458,36 @@ private fun xlsx(rows: List<List<String>>): ByteArray {
         "_rels/.rels" to """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>""",
         "xl/workbook.xml" to """<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="题库" sheetId="1" r:id="rId1"/></sheets></workbook>""",
         "xl/_rels/workbook.xml.rels" to """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>""",
+        "xl/worksheets/sheet1.xml" to sheet,
+    )
+    val out = ByteArrayOutputStream()
+    ZipOutputStream(out).use { zip ->
+        for ((name, body) in files) {
+            zip.putNextEntry(ZipEntry(name))
+            zip.write(body.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+    }
+    return out.toByteArray()
+}
+
+private fun sharedStringXlsx(): ByteArray {
+    val strings = listOf("题型", "题目", "A", "B", "C", "D", "E", "F", "答案", "单选题", "传输层负责什么", "端到端", "路由", "调制", "编码")
+    val shared = buildString {
+        append("""<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">""")
+        for (value in strings) append("<si><t>${escapeXml(value)}</t></si>")
+        append("</sst>")
+    }
+    val sheet = """<?xml version="1.0" encoding="UTF-8"?>
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+        <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c><c r="F1" t="s"><v>5</v></c><c r="G1" t="s"><v>6</v></c><c r="H1" t="s"><v>7</v></c><c r="I1" t="s"><v>8</v></c></row>
+        <row r="2"><c r="A2" t="s"><v>9</v></c><c r="B2" t="s"><v>10</v></c><c r="C2" t="s"><v>11</v></c><c r="D2" t="s"><v>12</v></c><c r="E2" t="s"><v>13</v></c><c r="F2" t="s"><v>14</v></c><c r="I2" t="inlineStr"><is><t>A</t></is></c></row>
+        </sheetData></worksheet>"""
+    val files = linkedMapOf(
+        "[Content_Types].xml" to """<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>""",
+        "xl/workbook.xml" to """<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="题库" sheetId="1" r:id="rId1"/></sheets></workbook>""",
+        "xl/_rels/workbook.xml.rels" to """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml"/></Relationships>""",
+        "xl/sharedStrings.xml" to shared,
         "xl/worksheets/sheet1.xml" to sheet,
     )
     val out = ByteArrayOutputStream()
