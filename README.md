@@ -57,6 +57,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_windows.ps1
 
 脚本只接受 64 位 Python 3.12。成功后请保留整个 `dist\Stinger` 文件夹（`Stinger.exe`、`_internal` 和 `assets`）。运行这份目录不再需要 Python。打包脚本还没有在本仓库的编写环境里执行过。
 
+## Android
+
+手机版是相机实时搜题：预览一直开着，把题目放进取景框后自动识别并在本机题库里查找。不拍照，也不需要再点一次确认。
+
+题库只从手机里已有的 Excel 选择。请先用数据线或普通的文件分享把 xlsx 拷到手机（下载、微信或 QQ 接收、USB），再点「导入题库」，在文件管理器里选这个 .xlsx。选择器会按扩展名和常见文件类型一起列出，选中后先复制到应用自己的目录再读取。成功或失败都会在画面上写出原因。可以同时保留多份题库，并在「全部题库」和某一份之间切换。表头与 `assets/stinger-question-template.xlsx` 相同。程序不提供局域网、Wi-Fi、二维码、附近分享或 HTTP 传题库。
+
+识别用的是打进安装包的 PP-OCRv4（检测、方向、识别），和桌面版 RapidOCR 是同一套模型，不在第一次打开时下载。清单里去掉了网络权限。只有屏幕上白色画框里的画面会送去识别，框外的字不会进入模型。手稍微晃动、短暂对焦发虚或某一帧没读出字时，灰色识别行和红色答案先保持不动；同一题连续几帧稳定，或画框里换成另一道并重新稳定后，才更新。持续对不齐、画面里没有字时才显示「未识别到文字」。分析分辨率大约 1080p，手机保持连续对焦，点画面可以重新对焦，暗的时候可以开补光。匹配规则从桌面版移植，包括小数、否定和数字、判断题只显示「对」或「错」，以及只有选项原文对得上才换算画面字母。确定答案用红色 `#c62828`。没有匹配、题目变了，或几道题答案冲突时，不把上一题的答案继续当成当前答案；冲突和不确定标「待确认」。
+
+已核对的构建范围：
+
+- `minSdk` 24（Android 7.0）。目标是 Android 7 的华为 Mate 8 和 Android 9 的 Xperia 这一档，以及更新的 arm 手机。
+- 调试 APK 只包含 `armeabi-v7a` 和 `arm64-v8a`。x86 模拟器装不上这份包。
+- 桌面版仍是 Windows 上的 Python，界面和行为没有改。手机和桌面都用 PP-OCRv4 ONNX；手机上的裁剪和后处理是按 RapidOCR 1.4.4 的参数重写的，实机画面仍可能和 Windows 截图不完全一样。
+- 这台构建环境没有手机相机。取景、权限弹窗、实机识别速度和各机型对焦都还没有在真机上试过。
+
+在装好 Android SDK 后：
+
+```bash
+cd android
+# local.properties 里写 sdk.dir=/你的/Android/Sdk
+./gradlew :core:test :app:lintDebug :app:assembleDebug
+```
+
+调试包在 `android/app/build/outputs/apk/debug/app-debug.apk`。
+
 ## 许可
 
 Apache License 2.0。独立实现，不是 ibosOCR 的改版。说明见 `NOTICE`。

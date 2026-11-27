@@ -17,3 +17,8 @@ error.log
 *.log
 .idea/
 .DS_Store
+android/.gradle/
+android/local.properties
+android/**/build/
+*.apk
+!android/core/src/test/resources/stinger-question-template.xlsx

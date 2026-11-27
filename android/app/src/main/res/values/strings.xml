@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Stinger</string>
+    <string name="import_bank">导入题库</string>
+    <string name="allow_camera">允许使用相机</string>
+    <string name="open_settings">打开设置</string>
+    <string name="camera_needed">需要相机才能对准题目。识别和已导入的题库都只在本机进行。</string>
+    <string name="all_banks">全部题库</string>
+    <string name="aim">对准题目</string>
+    <string name="ocr_waiting">识别：对准取景框里的题目</string>
+    <string name="ocr_none">未识别到文字</string>
+    <string name="torch">补光</string>
+    <string name="torch_off">关灯</string>
+    <string name="no_camera">没有可用相机</string>
+    <string name="ocr_unavailable">识别组件不可用</string>
+    <string name="import_local">从手机里选择已经保存的 Excel。题库只留在本机。</string>
+    <string name="pick_excel">选择 Excel 题库</string>
+    <string name="storage_rationale">这个文件用的是旧式本地路径。允许存储权限后才能读它；也可以回到文件管理器，重新选择 .xlsx。</string>
+</resources>
