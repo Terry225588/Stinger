@@ -32,7 +32,7 @@ class PpOcr(
 
     fun recognize(argb: IntArray, width: Int, height: Int): String {
         if (width < 8 || height < 8 || argb.size < width * height) return ""
-        val source = BgrImage.fromArgb(argb, width, height)
+        val source = BgrImage.fromArgb(argb, width, height).sharpenMild()
         val lines = detectLines(source)
         if (lines.isEmpty()) return ""
         val texts = ArrayList<String>()
@@ -401,6 +401,28 @@ private class BgrImage(val width: Int, val height: Int, val data: ByteArray) {
             val dest = (pixels - 1 - index) * 3
             val source = index * 3
             data.copyInto(out, dest, source, source + 3)
+        }
+        return BgrImage(width, height, out)
+    }
+
+    fun sharpenMild(): BgrImage {
+        val amount = 0.22f
+        val out = ByteArray(data.size)
+        for (y in 0 until height) {
+            val row = y * width
+            for (x in 0 until width) {
+                val left = if (x == 0) x else x - 1
+                val right = if (x == width - 1) x else x + 1
+                for (channel in 0 until 3) {
+                    val center = data[(row + x) * 3 + channel].toInt() and 0xFF
+                    val blur = (
+                        (data[(row + left) * 3 + channel].toInt() and 0xFF) +
+                            (data[(row + right) * 3 + channel].toInt() and 0xFF)
+                        ) / 2f
+                    val value = center + amount * (center - blur)
+                    out[(row + x) * 3 + channel] = value.roundToInt().coerceIn(0, 255).toByte()
+                }
+            }
         }
         return BgrImage(width, height, out)
     }

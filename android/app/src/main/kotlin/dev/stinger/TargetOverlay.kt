@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import java.util.concurrent.atomic.AtomicReference
 
 /** 取景框。OCR 只使用同一比例的画面，不把底部答案再送去识别。 */
 class TargetOverlay @JvmOverloads constructor(
@@ -24,16 +25,25 @@ class TargetOverlay @JvmOverloads constructor(
         textSize = resources.displayMetrics.density * 14f
     }
     private val hole = RectF()
+    private val publishedHole = AtomicReference(RectF())
+
+    fun currentHole(): RectF = RectF(publishedHole.get())
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        publishHole(w, h)
+    }
+
+    private fun publishHole(w: Int, h: Int) {
+        if (w <= 0 || h <= 0) return
+        publishedHole.set(RectF(w * LEFT, h * TOP, w * RIGHT, h * BOTTOM))
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         if (width == 0 || height == 0) return
-        hole.set(
-            width * LEFT,
-            height * TOP,
-            width * RIGHT,
-            height * BOTTOM,
-        )
+        publishHole(width, height)
+        hole.set(publishedHole.get())
         canvas.drawRect(0f, 0f, width.toFloat(), hole.top, shade)
         canvas.drawRect(0f, hole.bottom, width.toFloat(), height.toFloat(), shade)
         canvas.drawRect(0f, hole.top, hole.left, hole.bottom, shade)

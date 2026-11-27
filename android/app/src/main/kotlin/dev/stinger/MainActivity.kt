@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Build
@@ -33,9 +34,12 @@ import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import dev.stinger.databinding.ActivityMainBinding
 import dev.stinger.ocr.PpOcr
+import dev.stinger.ocr.ViewfinderMap
+import java.util.concurrent.atomic.AtomicReference
 import dev.stinger.match.BankCatalog
 import dev.stinger.match.CameraReadout
 import dev.stinger.match.FrameGate
@@ -67,6 +71,8 @@ class MainActivity : AppCompatActivity() {
     private val closed = AtomicBoolean(false)
     private var stickyStatus: CameraReadout? = null
     private var pendingUris: List<Uri>? = null
+    private var usingFrontCamera = false
+    private val viewSnapshot = AtomicReference<ViewSnapshot?>(null)
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -147,6 +153,9 @@ class MainActivity : AppCompatActivity() {
             focusAt(event.x, event.y)
             true
         }
+        val layoutWatcher = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> publishViewfinder() }
+        binding.preview.addOnLayoutChangeListener(layoutWatcher)
+        binding.target.addOnLayoutChangeListener(layoutWatcher)
         binding.banks.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (updatingSpinner) return
@@ -389,8 +398,14 @@ class MainActivity : AppCompatActivity() {
                         .build()
                     analysis.setAnalyzer(analysisExecutor) { image -> analyze(image) }
                     val selector = when {
-                        provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
-                        provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
+                        provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> {
+                            usingFrontCamera = false
+                            CameraSelector.DEFAULT_BACK_CAMERA
+                        }
+                        provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> {
+                            usingFrontCamera = true
+                            CameraSelector.DEFAULT_FRONT_CAMERA
+                        }
                         else -> {
                             render(CameraReadout(null, getString(R.string.no_camera), ""))
                             return@addListener
@@ -410,7 +425,9 @@ class MainActivity : AppCompatActivity() {
                             provider.bindToLifecycle(this, selector, preview, analysis)
                         }
                         camera?.cameraControl?.enableTorch(torchOn)
-                        focusAt(binding.preview.width / 2f, binding.preview.height * 0.32f)
+                        publishViewfinder()
+                        val hole = viewSnapshot.get()
+                        if (hole != null) focusAt((hole.left + hole.right) / 2f, (hole.top + hole.bottom) / 2f)
                         cameraBound = true
                     } catch (exc: Exception) {
                         cameraBound = false
@@ -437,10 +454,31 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
+        val snapshot = viewSnapshot.get()
+        if (snapshot == null) {
+            image.close()
+            gate.release()
+            return
+        }
         val cropped = try {
+            val rotation = image.imageInfo.rotationDegrees
             val full = image.toBitmap()
-            val part = cropToTarget(full)
-            if (part !== full) full.recycle()
+            val upright = rotateToUpright(full, rotation)
+            if (upright !== full) full.recycle()
+            val crop = ViewfinderMap.map(
+                viewWidth = snapshot.viewWidth,
+                viewHeight = snapshot.viewHeight,
+                uprightWidth = upright.width,
+                uprightHeight = upright.height,
+                viewLeft = snapshot.left,
+                viewTop = snapshot.top,
+                viewRight = snapshot.right,
+                viewBottom = snapshot.bottom,
+                scale = snapshot.scale,
+                mirrored = snapshot.mirrored,
+            )
+            val part = Bitmap.createBitmap(upright, crop.left, crop.top, crop.width, crop.height)
+            if (part !== upright) upright.recycle()
             part
         } catch (_: Exception) {
             image.close()
@@ -552,7 +590,7 @@ class MainActivity : AppCompatActivity() {
             y += step
         }
         if (count == 0) return true
-        return sum / count > 28.0
+        return sum / count > 16.0
     }
 
     private fun gray(pixel: Int): Int {
@@ -635,13 +673,60 @@ class MainActivity : AppCompatActivity() {
         return normalizeImportName(uri.lastPathSegment ?: "题库.xlsx")
     }
 
-    private fun cropToTarget(source: Bitmap): Bitmap {
-        val x = (source.width * TargetOverlay.LEFT).toInt().coerceIn(0, source.width - 1)
-        val y = (source.height * TargetOverlay.TOP).toInt().coerceIn(0, source.height - 1)
-        val right = (source.width * TargetOverlay.RIGHT).toInt().coerceIn(x + 1, source.width)
-        val bottom = (source.height * TargetOverlay.BOTTOM).toInt().coerceIn(y + 1, source.height)
-        return Bitmap.createBitmap(source, x, y, right - x, bottom - y)
+    private fun publishViewfinder() {
+        val preview = binding.preview
+        val hole = binding.target.currentHole()
+        if (preview.width <= 0 || preview.height <= 0 || hole.width() <= 1f || hole.height() <= 1f) return
+        val previewLocation = IntArray(2)
+        val overlayLocation = IntArray(2)
+        preview.getLocationOnScreen(previewLocation)
+        binding.target.getLocationOnScreen(overlayLocation)
+        hole.offset(
+            (overlayLocation[0] - previewLocation[0]).toFloat(),
+            (overlayLocation[1] - previewLocation[1]).toFloat(),
+        )
+        viewSnapshot.set(
+            ViewSnapshot(
+                viewWidth = preview.width,
+                viewHeight = preview.height,
+                left = hole.left,
+                top = hole.top,
+                right = hole.right,
+                bottom = hole.bottom,
+                scale = previewScale(),
+                mirrored = usingFrontCamera,
+            ),
+        )
     }
+
+    private fun previewScale(): ViewfinderMap.Scale {
+        return when (binding.preview.scaleType) {
+            PreviewView.ScaleType.FILL_START -> ViewfinderMap.Scale.FILL_START
+            PreviewView.ScaleType.FILL_END -> ViewfinderMap.Scale.FILL_END
+            PreviewView.ScaleType.FIT_START -> ViewfinderMap.Scale.FIT_START
+            PreviewView.ScaleType.FIT_CENTER -> ViewfinderMap.Scale.FIT_CENTER
+            PreviewView.ScaleType.FIT_END -> ViewfinderMap.Scale.FIT_END
+            else -> ViewfinderMap.Scale.FILL_CENTER
+        }
+    }
+
+    private fun rotateToUpright(source: Bitmap, rotationDegrees: Int): Bitmap {
+        val rotation = Math.floorMod(rotationDegrees, 360)
+        if (rotation == 0) return source
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+    }
+
+    private data class ViewSnapshot(
+        val viewWidth: Int,
+        val viewHeight: Int,
+        val left: Float,
+        val top: Float,
+        val right: Float,
+        val bottom: Float,
+        val scale: ViewfinderMap.Scale,
+        val mirrored: Boolean,
+    )
 
     companion object {
         private const val MAX_IMPORT_BYTES = 32 * 1024 * 1024
