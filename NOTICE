@@ -29,9 +29,12 @@ https://github.com/Lihvarya/ibosOCR 的源文件拷贝进来再修改。
 Android 版另外使用这些依赖，没有改它们的源码：
 
 - AndroidX、CameraX、Kotlin，Apache-2.0
-- Google ML Kit Text Recognition Chinese（`com.google.mlkit:text-recognition-chinese` 16.0.1）
-  这是带模型的依赖，中文识别模型打进 APK，不在首次启动时下载。
-  它的使用条款是 Google ML Kit Terms of Service，不是 Apache-2.0。
-  本仓库不把该模型当成自己的源码。
+- ONNX Runtime Android 1.20.0，MIT License，Microsoft
+- 中文识别模型打进 APK，不在首次打开时下载，也没有网络权限：
+  - `ch_PP-OCRv4_det_infer.onnx`、`ch_PP-OCRv4_rec_infer.onnx`、`ch_ppocr_mobile_v2.0_cls_infer.onnx`
+  - 来自 RapidOCR 1.4.4（Apache-2.0，作者 SWHL）随附的 PaddleOCR PP-OCRv4 模型
+  - PaddleOCR 模型本身也是 Apache-2.0
+  - 字符表在识别模型的元数据里
+- 手机端的检测、方向校正和 CTC 解码按 RapidOCR 1.4.4 的参数重写，不是把那份 Python 源码原样拷进来。
 
 手机版不提供局域网、Wi-Fi、二维码或 HTTP 传题库。Excel 由用户自行放到手机里再选择。

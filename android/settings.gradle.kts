@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "stinger-android"
-include(":core", ":app")
+include(":core", ":ocr", ":app")

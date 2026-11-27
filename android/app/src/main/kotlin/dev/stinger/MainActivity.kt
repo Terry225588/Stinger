@@ -6,30 +6,36 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Size
+import android.view.MotionEvent
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import dev.stinger.databinding.ActivityMainBinding
+import dev.stinger.ocr.PpOcr
 import dev.stinger.match.BankCatalog
 import dev.stinger.match.CameraReadout
 import dev.stinger.match.FrameGate
@@ -52,7 +58,9 @@ class MainActivity : AppCompatActivity() {
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val workExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var cameraProvider: ProcessCameraProvider? = null
-    private var recognizer: TextRecognizer? = null
+    private var camera: Camera? = null
+    private var torchOn = false
+    private var recognizer: PpOcr? = null
     private var cameraBound = false
     private var askedPermission = false
     private var updatingSpinner = false
@@ -129,6 +137,16 @@ class MainActivity : AppCompatActivity() {
         session = LookupSession { catalog.active() }
         binding.importBank.setOnClickListener { openImporter() }
         binding.allowCamera.setOnClickListener { requestCamera() }
+        binding.torch.setOnClickListener {
+            torchOn = !torchOn
+            camera?.cameraControl?.enableTorch(torchOn)
+            binding.torch.setText(if (torchOn) R.string.torch_off else R.string.torch)
+        }
+        binding.preview.setOnTouchListener { _, event ->
+            if (event.action != MotionEvent.ACTION_UP) return@setOnTouchListener false
+            focusAt(event.x, event.y)
+            true
+        }
         binding.banks.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (updatingSpinner) return
@@ -331,6 +349,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun openCamera() {
         hidePermissionDenied()
         binding.preview.post {
@@ -346,12 +365,27 @@ class MainActivity : AppCompatActivity() {
                         return@addListener
                     }
                     cameraProvider = provider
-                    val preview = Preview.Builder().build().also {
+                    val previewBuilder = Preview.Builder()
+                    Camera2Interop.Extender(previewBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AF_MODE,
+                            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
+                        )
+                    val preview = previewBuilder.build().also {
                         it.surfaceProvider = binding.preview.surfaceProvider
                     }
+                    val resolution = ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(1920, 1080),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                            ),
+                        )
+                        .build()
                     val analysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                        .setResolutionSelector(resolution)
                         .build()
                     analysis.setAnalyzer(analysisExecutor) { image -> analyze(image) }
                     val selector = when {
@@ -365,7 +399,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         provider.unbindAll()
                         val viewPort = binding.preview.viewPort
-                        if (viewPort != null) {
+                        camera = if (viewPort != null) {
                             val group = UseCaseGroup.Builder()
                                 .setViewPort(viewPort)
                                 .addUseCase(preview)
@@ -375,6 +409,8 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             provider.bindToLifecycle(this, selector, preview, analysis)
                         }
+                        camera?.cameraControl?.enableTorch(torchOn)
+                        focusAt(binding.preview.width / 2f, binding.preview.height * 0.32f)
                         cameraBound = true
                     } catch (exc: Exception) {
                         cameraBound = false
@@ -412,26 +448,62 @@ class MainActivity : AppCompatActivity() {
             return
         }
         image.close()
-        val client = textRecognizer()
-        if (client == null || closed.get()) {
-            cropped.recycle()
+        val pixels = IntArray(cropped.width * cropped.height)
+        cropped.getPixels(pixels, 0, cropped.width, 0, 0, cropped.width, cropped.height)
+        val width = cropped.width
+        val height = cropped.height
+        cropped.recycle()
+        if (!sharpEnough(pixels, width, height)) {
             gate.release()
             return
         }
-        client.process(InputImage.fromBitmap(cropped, 0))
-            .addOnSuccessListener { vision -> deliver(readLines(vision)) }
-            .addOnFailureListener { deliver("") }
-            .addOnCompleteListener {
-                cropped.recycle()
-                gate.release()
+        val client = textRecognizer()
+        if (client == null || closed.get()) {
+            gate.release()
+            return
+        }
+        workExecutor.execute {
+            val raw = try {
+                client.recognize(pixels, width, height)
+            } catch (_: Exception) {
+                ""
             }
+            gate.release()
+            deliver(raw)
+        }
+    }
+
+    private fun focusAt(x: Float, y: Float) {
+        val active = camera ?: return
+        if (binding.preview.width == 0 || binding.preview.height == 0) return
+        val point = binding.preview.meteringPointFactory.createPoint(x, y)
+        active.cameraControl.startFocusAndMetering(
+            FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).build(),
+        )
     }
 
     private fun deliver(raw: String) {
         if (closed.get()) return
+        val shown = raw.replace('\n', ' ').trim()
+        runOnUiThread {
+            if (!closed.get()) {
+                binding.ocrLine.text = if (shown.isEmpty()) {
+                    getString(R.string.ocr_none)
+                } else {
+                    "识别：$shown"
+                }
+            }
+        }
         if (catalog.isEmpty()) {
             runOnUiThread {
                 if (!closed.get()) render(CameraReadout(null, "请先导入题库", getString(R.string.import_local)))
+            }
+            return
+        }
+        if (shown.isEmpty()) {
+            session.invalidate()
+            runOnUiThread {
+                if (!closed.get()) render(CameraReadout(null, getString(R.string.ocr_none), ""))
             }
             return
         }
@@ -439,24 +511,55 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             if (session.isCurrent(token)) render(CameraReadout(null, getString(R.string.aim), ""))
         }
-        workExecutor.execute {
-            val readout = session.readout(raw)
-            runOnUiThread {
-                if (!closed.get() && session.isCurrent(token)) render(readout)
-            }
+        val readout = session.readout(raw)
+        runOnUiThread {
+            if (!closed.get() && session.isCurrent(token)) render(readout)
         }
     }
 
-    private fun textRecognizer(): TextRecognizer? {
+    private fun textRecognizer(): PpOcr? {
         recognizer?.let { return it }
         return try {
-            TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()).also { recognizer = it }
+            val det = assets.open("ocr/ch_PP-OCRv4_det_infer.onnx").use { it.readBytes() }
+            val rec = assets.open("ocr/ch_PP-OCRv4_rec_infer.onnx").use { it.readBytes() }
+            val cls = assets.open("ocr/ch_ppocr_mobile_v2.0_cls_infer.onnx").use { it.readBytes() }
+            PpOcr(det, rec, cls).also { recognizer = it }
         } catch (_: Throwable) {
             runOnUiThread {
                 render(CameraReadout(null, getString(R.string.ocr_unavailable), ""))
             }
             null
         }
+    }
+
+    private fun sharpEnough(pixels: IntArray, width: Int, height: Int): Boolean {
+        if (width < 16 || height < 16) return false
+        var count = 0
+        var sum = 0.0
+        val step = 4
+        var y = step
+        while (y < height - step) {
+            var x = step
+            val row = y * width
+            while (x < width - step) {
+                val center = gray(pixels[row + x])
+                val dx = gray(pixels[row + x + step]) - center
+                val dy = gray(pixels[row + step * width + x]) - center
+                sum += dx * dx + dy * dy
+                count++
+                x += step
+            }
+            y += step
+        }
+        if (count == 0) return true
+        return sum / count > 28.0
+    }
+
+    private fun gray(pixel: Int): Int {
+        val red = (pixel shr 16) and 0xFF
+        val green = (pixel shr 8) and 0xFF
+        val blue = pixel and 0xFF
+        return (red * 30 + green * 59 + blue * 11) / 100
     }
 
     private fun showImport(readout: CameraReadout) {
@@ -538,16 +641,6 @@ class MainActivity : AppCompatActivity() {
         val right = (source.width * TargetOverlay.RIGHT).toInt().coerceIn(x + 1, source.width)
         val bottom = (source.height * TargetOverlay.BOTTOM).toInt().coerceIn(y + 1, source.height)
         return Bitmap.createBitmap(source, x, y, right - x, bottom - y)
-    }
-
-    private fun readLines(text: Text): String {
-        val lines = text.textBlocks
-            .flatMap { it.lines }
-            .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
-            .map { it.text.trim() }
-            .filter { it.isNotEmpty() }
-        if (lines.isNotEmpty()) return lines.joinToString("\n")
-        return text.text
     }
 
     companion object {

@@ -11,8 +11,8 @@ android {
         applicationId = "dev.stinger"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
@@ -55,6 +55,9 @@ dependencies {
     implementation(project(":core")) {
         exclude(group = "org.json", module = "json")
     }
+    implementation(project(":ocr")) {
+        exclude(group = "com.microsoft.onnxruntime", module = "onnxruntime")
+    }
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
@@ -62,6 +65,6 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.1")
     implementation("androidx.camera:camera-lifecycle:1.4.1")
     implementation("androidx.camera:camera-view:1.4.1")
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
