@@ -37,6 +37,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import dev.stinger.databinding.ActivityMainBinding
+import dev.stinger.ocr.FrameMotion
+import dev.stinger.ocr.LiveLock
+import dev.stinger.ocr.LockDecision
 import dev.stinger.ocr.PpOcr
 import dev.stinger.ocr.ViewfinderMap
 import java.util.concurrent.atomic.AtomicReference
@@ -58,7 +61,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var catalog: BankCatalog
     private lateinit var session: LookupSession
-    private val gate = FrameGate()
+    private val gate = FrameGate(minIntervalMs = 250)
+    private val liveLock = LiveLock()
+    private val frameMotion = FrameMotion()
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val workExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var cameraProvider: ProcessCameraProvider? = null
@@ -491,7 +496,13 @@ class MainActivity : AppCompatActivity() {
         val width = cropped.width
         val height = cropped.height
         cropped.recycle()
+        if (frameMotion.observe(pixels, width, height)) {
+            applyLock(liveLock.onMotion())
+            gate.release()
+            return
+        }
         if (!sharpEnough(pixels, width, height)) {
+            applyLock(liveLock.onBlur())
             gate.release()
             return
         }
@@ -506,8 +517,24 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 ""
             }
+            val decision = liveLock.onText(raw)
             gate.release()
-            deliver(raw)
+            applyLock(decision)
+        }
+    }
+
+    private fun applyLock(decision: LockDecision) {
+        when (decision) {
+            LockDecision.Hold -> Unit
+            LockDecision.Clear -> {
+                session.invalidate()
+                runOnUiThread {
+                    if (closed.get()) return@runOnUiThread
+                    binding.ocrLine.text = getString(R.string.ocr_none)
+                    render(CameraReadout(null, getString(R.string.ocr_none), ""))
+                }
+            }
+            is LockDecision.Replace -> deliverStable(decision.text)
         }
     }
 
@@ -520,38 +547,29 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun deliver(raw: String) {
+    private fun deliverStable(raw: String) {
         if (closed.get()) return
         val shown = raw.replace('\n', ' ').trim()
-        runOnUiThread {
-            if (!closed.get()) {
-                binding.ocrLine.text = if (shown.isEmpty()) {
-                    getString(R.string.ocr_none)
-                } else {
-                    "识别：$shown"
-                }
-            }
-        }
         if (catalog.isEmpty()) {
             runOnUiThread {
-                if (!closed.get()) render(CameraReadout(null, "请先导入题库", getString(R.string.import_local)))
+                if (closed.get()) return@runOnUiThread
+                binding.ocrLine.text = "识别：$shown"
+                render(CameraReadout(null, "请先导入题库", getString(R.string.import_local)))
             }
             return
         }
-        if (shown.isEmpty()) {
-            session.invalidate()
+        val token = session.begin(raw) ?: run {
             runOnUiThread {
-                if (!closed.get()) render(CameraReadout(null, getString(R.string.ocr_none), ""))
+                if (!closed.get()) binding.ocrLine.text = "识别：$shown"
             }
             return
-        }
-        val token = session.begin(raw) ?: return
-        runOnUiThread {
-            if (session.isCurrent(token)) render(CameraReadout(null, getString(R.string.aim), ""))
         }
         val readout = session.readout(raw)
         runOnUiThread {
-            if (!closed.get() && session.isCurrent(token)) render(readout)
+            if (!closed.get() && session.isCurrent(token)) {
+                binding.ocrLine.text = "识别：$shown"
+                render(readout)
+            }
         }
     }
 

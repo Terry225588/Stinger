@@ -14,6 +14,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 }
 
 dependencies {
+    implementation(project(":core"))
     implementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
     testImplementation(kotlin("test"))
 }
